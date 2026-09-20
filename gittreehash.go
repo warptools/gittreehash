@@ -149,7 +149,7 @@ func hashSomething(fsys fsx.FS, pth string) ([32]byte, fs.FileMode, error) {
 			}
 			switch dirEntMode & fs.ModeType {
 			case 0:
-				if dirEntMode&0o111 != 0 {
+				if dirEntMode&0o100 != 0 { // Only the user exec bit is consulted; this is how git classifies, regardless of the group and other bits.
 					buf.Write([]byte("100755 "))
 				} else {
 					buf.Write([]byte("100644 "))
