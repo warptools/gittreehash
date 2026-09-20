@@ -21,11 +21,15 @@ import (
 func main() {
 	startPath := "."
 	if len(os.Args) > 1 {
-		startPath = filepath.Clean(os.Args[1])
+		startPath = os.Args[1]
 	}
-	fsys := osfs.DirFS(".")
+	fsys, name, err := rootFS(startPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", serum.ToJSONString(err))
+		os.Exit(9)
+	}
 
-	hash, _, err := hashSomething(fsys, startPath)
+	hash, _, err := hashSomething(fsys, name)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", serum.ToJSONString(err))
 		os.Exit(9)
@@ -33,6 +37,27 @@ func main() {
 	var hashHex [64]byte
 	hex.Encode(hashHex[:], hash[:])
 	fmt.Printf("%s\n", hashHex)
+}
+
+// rootFS opens a filesystem for the given path, and returns the name to address that path by within it.
+//
+// The filesystem is rooted at the *parent* of the path, so that a symlink given as the argument
+// is hashed as a symlink: a path addressed as "." within its own filesystem gets resolved
+// by the operating system before we ever get to lstat it.
+//
+// Errors:
+//
+//   - gittreehash-error-io -- if the process working directory can't be determined.
+func rootFS(pth string) (fsx.FS, string, error) {
+	abs, err := filepath.Abs(pth)
+	if err != nil {
+		return nil, "", serum.Errorf(ErrIO, "%w", err)
+	}
+	name := filepath.Base(abs)
+	if abs == "/" { // Base("/") is "/", which is not a valid name within a filesystem; the root dir has to address itself.
+		name = "."
+	}
+	return osfs.DirFS(filepath.Dir(abs)), name, nil
 }
 
 const (
