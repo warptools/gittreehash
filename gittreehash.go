@@ -93,7 +93,7 @@ func hashSomething(fsys fsx.FS, pth string) ([32]byte, fs.FileMode, error) {
 		claimedSize := fi.Size()
 		var preamble bytes.Buffer
 		preamble.WriteString("blob ")
-		preamble.WriteString(strconv.Itoa(int(claimedSize)))
+		preamble.WriteString(strconv.FormatInt(claimedSize, 10))
 		preamble.WriteByte(0)
 		preambleLen := preamble.Len()
 
@@ -117,7 +117,7 @@ func hashSomething(fsys fsx.FS, pth string) ([32]byte, fs.FileMode, error) {
 		claimedSize := fi.Size()
 		var preamble bytes.Buffer
 		preamble.WriteString("blob ")
-		preamble.WriteString(strconv.Itoa(int(claimedSize)))
+		preamble.WriteString(strconv.FormatInt(claimedSize, 10))
 		preamble.WriteByte(0)
 		preambleLen := preamble.Len()
 
