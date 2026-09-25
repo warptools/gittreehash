@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -21,11 +22,15 @@ import (
 func main() {
 	startPath := "."
 	if len(os.Args) > 1 {
-		startPath = filepath.Clean(os.Args[1])
+		startPath = os.Args[1]
 	}
-	fsys := osfs.DirFS(".")
+	fsys, name, err := rootFS(startPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", serum.ToJSONString(err))
+		os.Exit(9)
+	}
 
-	hash, _, err := hashSomething(fsys, startPath)
+	hash, _, err := hashSomething(fsys, name)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", serum.ToJSONString(err))
 		os.Exit(9)
@@ -33,6 +38,27 @@ func main() {
 	var hashHex [64]byte
 	hex.Encode(hashHex[:], hash[:])
 	fmt.Printf("%s\n", hashHex)
+}
+
+// rootFS opens a filesystem for the given path, and returns the name to address that path by within it.
+//
+// The filesystem is rooted at the *parent* of the path, so that a symlink given as the argument
+// is hashed as a symlink: a path addressed as "." within its own filesystem gets resolved
+// by the operating system before we ever get to lstat it.
+//
+// Errors:
+//
+//   - gittreehash-error-io -- if the process working directory can't be determined.
+func rootFS(pth string) (fsx.FS, string, error) {
+	abs, err := filepath.Abs(pth)
+	if err != nil {
+		return nil, "", serum.Errorf(ErrIO, "%w", err)
+	}
+	name := filepath.Base(abs)
+	if abs == "/" { // Base("/") is "/", which is not a valid name within a filesystem; the root dir has to address itself.
+		name = "."
+	}
+	return osfs.DirFS(filepath.Dir(abs)), name, nil
 }
 
 const (
@@ -67,7 +93,7 @@ func hashSomething(fsys fsx.FS, pth string) ([32]byte, fs.FileMode, error) {
 		claimedSize := fi.Size()
 		var preamble bytes.Buffer
 		preamble.WriteString("blob ")
-		preamble.WriteString(strconv.Itoa(int(claimedSize)))
+		preamble.WriteString(strconv.FormatInt(claimedSize, 10))
 		preamble.WriteByte(0)
 		preambleLen := preamble.Len()
 
@@ -91,7 +117,7 @@ func hashSomething(fsys fsx.FS, pth string) ([32]byte, fs.FileMode, error) {
 		claimedSize := fi.Size()
 		var preamble bytes.Buffer
 		preamble.WriteString("blob ")
-		preamble.WriteString(strconv.Itoa(int(claimedSize)))
+		preamble.WriteString(strconv.FormatInt(claimedSize, 10))
 		preamble.WriteByte(0)
 		preambleLen := preamble.Len()
 
@@ -115,16 +141,21 @@ func hashSomething(fsys fsx.FS, pth string) ([32]byte, fs.FileMode, error) {
 		if err != nil {
 			return [32]byte{}, mode, serum.Errorf(ErrIO, "%w", err)
 		}
-		// TODO: check if the sorting is correct, here.
-		var buf bytes.Buffer // Buffer to accumulate all the child object info and hashes, first.  Need this so we can compute the length of the whole tree object body.
+		children := make([]treeEntry, 0, len(dirEnts))
 		for _, dirEnt := range dirEnts {
 			hash, dirEntMode, err := hashSomething(fsys, filepath.Join(pth, dirEnt.Name()))
 			if err != nil {
 				return [32]byte{}, mode, err
 			}
-			switch dirEntMode & fs.ModeType {
+			children = append(children, treeEntry{dirEnt.Name(), dirEntMode, hash})
+		}
+		sort.Slice(children, func(i, j int) bool { return children[i].sortKey() < children[j].sortKey() })
+
+		var buf bytes.Buffer // Buffer to accumulate all the child object info and hashes, first.  Need this so we can compute the length of the whole tree object body.
+		for _, child := range children {
+			switch child.mode & fs.ModeType {
 			case 0:
-				if dirEntMode&0o111 != 0 {
+				if child.mode&0o100 != 0 { // Only the user exec bit is consulted; this is how git classifies, regardless of the group and other bits.
 					buf.Write([]byte("100755 "))
 				} else {
 					buf.Write([]byte("100644 "))
@@ -136,9 +167,9 @@ func hashSomething(fsys fsx.FS, pth string) ([32]byte, fs.FileMode, error) {
 			default:
 				panic("unreachable?  other types should've error earlier")
 			}
-			buf.Write([]byte(dirEnt.Name()))
+			buf.Write([]byte(child.name))
 			buf.Write([]byte{0})
-			buf.Write(hash[:])
+			buf.Write(child.hash[:])
 			// Somewhat shockingly, there's no delimiter here.  The hash length is necessary hardcoded by this absense.
 		}
 
@@ -163,6 +194,30 @@ func hashSomething(fsys fsx.FS, pth string) ([32]byte, fs.FileMode, error) {
 	default:
 		panic("unreachable?  'irregular' should be the catch-all here")
 	}
+}
+
+// treeEntry is one entry of a tree object, held aside until every child of a directory is hashed,
+// because entries have to be emitted in git's order rather than the order the directory was read in.
+type treeEntry struct {
+	name string
+	mode fs.FileMode
+	hash [32]byte
+}
+
+// sortKey is the name as git orders entries by: directory names sort as though they end in "/".
+//
+// Since "." (0x2e) is below "/" (0x2f), which is below "0" (0x30), this is observable:
+// a file "foo." sorts before a directory "foo", while a file "foo0" sorts after it.
+// Sorting on plain names gets the first of those backwards, and produces a tree object
+// that is well-formed and has an entirely wrong hash.
+//
+// The mode consulted here is the one that decides the entry's emitted mode field,
+// so the ordering can't disagree with the contents even if the filesystem changes underneath us.
+func (entry treeEntry) sortKey() string {
+	if entry.mode&fs.ModeType == fs.ModeDir {
+		return entry.name + "/"
+	}
+	return entry.name
 }
 
 func hashStream(data io.Reader) (hash [32]byte, contentSize int64, err error) {
